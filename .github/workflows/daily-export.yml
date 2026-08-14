@@ -1,0 +1,42 @@
+name: Daily OSV export
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub cron is UTC.
+    - cron: "23 3 * * *"  # 03:23 UTC daily
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-osv-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No dependencies: the export is standard library only, deliberately, so
+      # a supply chain data feed does not itself pull a supply chain.
+
+      - name: Run export
+        run: |
+          python osv_export.py
+
+      - name: Report sizes
+        run: ls -lh csv/
+
+      - name: Git Auto Commit
+        uses: stefanzweifel/git-auto-commit-action@v6
+        with:
+          commit_message: AutoUpdate OSV export
+          file_pattern: csv/*.csv
