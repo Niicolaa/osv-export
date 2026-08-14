@@ -3,13 +3,14 @@
 Fetch OSV data and write CSVs that KQL `externaldata()` (and anything else that
 reads a URL) can consume directly:
 
-- csv/malicious_all.csv          every malicious package report (MAL-*)
-- csv/malicious_high_signal.csv  the same, minus the amazon-inspector-only
-                                 tea.xyz spam flood
-- csv/vulnerable_all.csv         every non-malicious vulnerability, one row per
-                                 (ecosystem, package, osv_id)
-- csv/vulnerable_exploited.csv   only those known or likely to be exploited
-                                 (CISA KEV, or EPSS >= --epss-threshold)
+- csv/malicious_packages.csv     what to match on: package, ecosystem, versions
+- csv/malicious_advisories.csv   what to enrich with: reporter, dates, summary
+- csv/vulnerable_packages.csv    what to match on, plus version ranges
+- csv/vulnerable_advisories.csv  CVE, KEV, EPSS, CVSS, summary
+
+The package and advisory sides join on mal_id / osv_id. Splitting them keeps
+the prose out of the rows you scan, and lets a consumer fetch only what it
+needs.
 
 Upstream publishes ~285k individual JSON documents, which no query engine can
 read. This flattens them once so consumers fetch a single CSV.
@@ -78,26 +79,32 @@ REPO_HINTS = {
     "pub": "pub",
 }
 
-MALICIOUS_COLS = [
+# Split into a "packages" side and an "advisories" side, joined on the id.
+#
+# One advisory can affect many packages, so keeping the prose and scoring
+# columns out of the package rows stops them being repeated thousands of
+# times. Consumers fetch both and join in the query. The package side is what
+# you match against; the advisory side is what you enrich with afterwards.
+MALICIOUS_PACKAGE_COLS = [
     "ecosystem", "package", "package_lc", "repo_hint",
-    "mal_id", "source", "all_versions", "versions",
-    "published", "modified", "summary",
+    "mal_id", "all_versions", "versions",
 ]
 
-VULNERABLE_COLS = [
+MALICIOUS_ADVISORY_COLS = [
+    "mal_id", "source", "published", "modified", "summary",
+]
+
+VULNERABLE_PACKAGE_COLS = [
     "ecosystem", "package", "package_lc", "repo_hint",
+    "osv_id", "all_versions", "introduced", "fixed", "versions",
+]
+
+VULNERABLE_ADVISORY_COLS = [
     "osv_id", "cve", "aliases",
     "kev", "kev_ransomware", "epss", "epss_percentile",
     "cvss_v3", "cvss_v4",
-    "all_versions", "introduced", "fixed", "versions",
     "published", "modified", "summary",
 ]
-
-# One row per affected version, for exact (package, version) joins. Split per
-# ecosystem because the exploded form is ~1.9M rows overall - well past what
-# externaldata() will read from a single file. Join back to vulnerable_all.csv
-# on osv_id for CVE / KEV / EPSS.
-VERSION_COLS = ["package_lc", "version", "osv_id"]
 
 # externaldata() reads external artifacts up to 100 MB. Anything larger has to
 # be ingested as a table or watchlist instead, so the build says so loudly.
@@ -122,11 +129,6 @@ def fetch(url: str, timeout: int = 600) -> bytes:
 def clean(value: str | None) -> str:
     """Collapse whitespace; newlines would break the CSV row for externaldata."""
     return " ".join((value or "").split())
-
-
-def slug(value: str) -> str:
-    """Filename-safe ecosystem name: 'crates.io' -> 'crates_io'."""
-    return "".join(c if c.isalnum() else "_" for c in value.lower()).strip("_")
 
 
 def repo_hint(ecosystem: str) -> str:
@@ -196,14 +198,15 @@ def malicious_sources(record: dict) -> str:
     return "|".join(sorted(found))
 
 
-def build_malicious(tarball: Path | None) -> list[dict]:
+def build_malicious(tarball: Path | None) -> tuple[list[dict], list[dict]]:
     if tarball is None:
         tar = tarfile.open(fileobj=io.BytesIO(fetch(MALICIOUS_TARBALL)), mode="r:gz")
     else:
         log.info("reading local tarball %s", tarball)
         tar = tarfile.open(tarball, mode="r:gz")
 
-    rows: list[dict] = []
+    packages: list[dict] = []
+    advisories: dict[str, dict] = {}
     seen: set[tuple[str, str, str]] = set()
     with tar:
         for member in tar:
@@ -223,7 +226,14 @@ def build_malicious(tarball: Path | None) -> list[dict]:
             mal_id = record.get("id", "")
             if not mal_id.startswith("MAL-"):
                 continue
-            source = malicious_sources(record)
+
+            advisories.setdefault(mal_id, {
+                "mal_id": mal_id,
+                "source": malicious_sources(record),
+                "published": record.get("published", ""),
+                "modified": record.get("modified", ""),
+                "summary": clean(record.get("summary")),
+            })
 
             for affected in record.get("affected") or []:
                 package = (affected or {}).get("package") or {}
@@ -236,20 +246,16 @@ def build_malicious(tarball: Path | None) -> list[dict]:
                     continue
                 seen.add(key)
                 versions, everything = affected_versions(affected)
-                rows.append({
+                packages.append({
                     "ecosystem": ecosystem,
                     "package": name,
                     "package_lc": name.lower(),
                     "repo_hint": repo_hint(ecosystem),
                     "mal_id": mal_id,
-                    "source": source,
                     "all_versions": "true" if everything else "false",
                     "versions": pad(versions),
-                    "published": record.get("published", ""),
-                    "modified": record.get("modified", ""),
-                    "summary": clean(record.get("summary")),
                 })
-    return rows
+    return packages, list(advisories.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -327,8 +333,9 @@ def version_bounds(affected: dict) -> tuple[str, str]:
 
 
 def build_vulnerable(kev: dict[str, bool],
-                     epss: dict[str, tuple[str, str]]) -> list[dict]:
-    rows: list[dict] = []
+                     epss: dict[str, tuple[str, str]]) -> tuple[list[dict], list[dict]]:
+    packages: list[dict] = []
+    advisories: dict[str, dict] = {}
     seen: set[tuple[str, str, str]] = set()
 
     for ecosystem in ECOSYSTEMS:
@@ -376,11 +383,7 @@ def build_vulnerable(kev: dict[str, bool],
                     v3, v4 = severity_vectors(record, affected)
                     introduced, fixed = version_bounds(affected)
                     versions, everything = affected_versions(affected)
-                    rows.append({
-                        "ecosystem": eco,
-                        "package": pkg_name,
-                        "package_lc": pkg_name.lower(),
-                        "repo_hint": repo_hint(eco),
+                    advisories.setdefault(osv_id, {
                         "osv_id": osv_id,
                         "cve": cve,
                         "aliases": "|".join(aliases),
@@ -390,18 +393,25 @@ def build_vulnerable(kev: dict[str, bool],
                         "epss_percentile": percentile,
                         "cvss_v3": v3,
                         "cvss_v4": v4,
-                        "all_versions": "true" if everything else "false",
-                        "introduced": introduced,
-                        "fixed": fixed,
-                        "versions": pad(versions),
                         "published": record.get("published", ""),
                         "modified": record.get("modified", ""),
                         "summary": clean(record.get("summary")),
                     })
+                    packages.append({
+                        "ecosystem": eco,
+                        "package": pkg_name,
+                        "package_lc": pkg_name.lower(),
+                        "repo_hint": repo_hint(eco),
+                        "osv_id": osv_id,
+                        "all_versions": "true" if everything else "false",
+                        "introduced": introduced,
+                        "fixed": fixed,
+                        "versions": pad(versions),
+                    })
                     count += 1
         log.info("%s: %d rows", ecosystem, count)
 
-    return rows
+    return packages, list(advisories.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -416,9 +426,6 @@ def main() -> int:
                         help="reuse an already-downloaded malicious-packages tarball")
     parser.add_argument("--skip-malicious", action="store_true")
     parser.add_argument("--skip-vulnerable", action="store_true")
-    parser.add_argument("--epss-threshold", type=float, default=0.1,
-                        help="EPSS probability at or above which a vulnerability "
-                             "counts as likely exploited (default: 0.1)")
     parser.add_argument("--min-malicious-rows", type=int, default=100_000,
                         help="fail rather than publish a truncated malicious "
                              "export (default: 100000)")
@@ -428,52 +435,21 @@ def main() -> int:
     csv_dir = args.base_dir / "csv"
 
     if not args.skip_malicious:
-        rows = build_malicious(args.tarball)
-        if len(rows) < args.min_malicious_rows:
+        packages, advisories = build_malicious(args.tarball)
+        if len(packages) < args.min_malicious_rows:
             log.error("only %d malicious rows (< %d), refusing to publish",
-                      len(rows), args.min_malicious_rows)
+                      len(packages), args.min_malicious_rows)
             return 1
-        write_csv(csv_dir / "malicious_all.csv", MALICIOUS_COLS, rows)
-
-        # Everything except records whose only reporter is amazon-inspector,
-        # which is overwhelmingly the tea.xyz npm token-farming flood.
-        high = [r for r in rows if r["source"] != "amazon-inspector"]
-        write_csv(csv_dir / "malicious_high_signal.csv", MALICIOUS_COLS, high)
+        write_csv(csv_dir / "malicious_packages.csv", MALICIOUS_PACKAGE_COLS, packages)
+        write_csv(csv_dir / "malicious_advisories.csv", MALICIOUS_ADVISORY_COLS, advisories)
 
     if not args.skip_vulnerable:
-        rows = build_vulnerable(load_kev(), load_epss())
-        if not rows:
+        packages, advisories = build_vulnerable(load_kev(), load_epss())
+        if not packages:
             log.error("no vulnerability rows produced, refusing to publish")
             return 1
-        write_csv(csv_dir / "vulnerable_all.csv", VULNERABLE_COLS, rows)
-
-        # One file per ecosystem, one row per affected version, so a consumer
-        # can join on (package_lc, version) instead of flagging every version
-        # of a package that was only ever vulnerable in a few of them.
-        by_ecosystem: dict[str, list[dict]] = {}
-        for row in rows:
-            for version in row["versions"].strip("|").split("|"):
-                if not version:
-                    continue
-                by_ecosystem.setdefault(row["ecosystem"], []).append({
-                    "package_lc": row["package_lc"],
-                    "version": version,
-                    "osv_id": row["osv_id"],
-                })
-        for ecosystem, exploded in sorted(by_ecosystem.items()):
-            write_csv(csv_dir / "versions" / f"{slug(ecosystem)}.csv",
-                      VERSION_COLS, exploded)
-
-        def exploited(row: dict) -> bool:
-            if row["kev"] == "true":
-                return True
-            try:
-                return float(row["epss"]) >= args.epss_threshold
-            except ValueError:
-                return False
-
-        write_csv(csv_dir / "vulnerable_exploited.csv",
-                  VULNERABLE_COLS, [r for r in rows if exploited(r)])
+        write_csv(csv_dir / "vulnerable_packages.csv", VULNERABLE_PACKAGE_COLS, packages)
+        write_csv(csv_dir / "vulnerable_advisories.csv", VULNERABLE_ADVISORY_COLS, advisories)
 
     return 0
 
