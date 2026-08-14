@@ -14,6 +14,10 @@ It stores the **CSV-converted** datasets in `csv/`:
   - `csv/vulnerable_all.csv` — one row per (ecosystem, package, advisory)
   - `csv/vulnerable_exploited.csv` — only those in CISA KEV, or with EPSS ≥ 0.1
 
+Rows carry an `ecosystem` from the advisory itself, so a few entries appear
+under an ecosystem other than the archive they came from (a Go advisory that
+also names a GitHub Actions package, for example).
+
 A GitHub Actions workflow runs **daily** to update the data automatically.
 
 ## Why this exists
@@ -109,11 +113,11 @@ Join on `package_lc` in both. One row per `(ecosystem, package, id)`.
 
 ## Read this before you alert on it
 
-**The malicious npm data is mostly junk.** 219,321 of the 235,286 malicious
-rows are npm, and **144,078 of those come from `source=amazon-inspector`** —
-the tea.xyz token-farming spam flood. Those packages are garbage, but they are
-not targeted attacks, and treating every hit as an incident will bury you.
-`csv/malicious_high_signal.csv` drops them, leaving 91,208 rows.
+**The malicious npm data is mostly junk.** Of the 235,287 malicious rows,
+219,321 are npm, and **144,078 come from `source=amazon-inspector`** — the
+tea.xyz token-farming spam flood. Those packages are garbage, but they are not
+targeted attacks, and treating every hit as an incident will bury you.
+`csv/malicious_high_signal.csv` drops them, leaving 91,209 rows.
 
 **Version ranges are flattened.** `introduced` and `fixed` are pipe-separated
 lists, so the pairing between an introduced version and its matching fix is
@@ -136,10 +140,11 @@ datasets, ingest into a table or watchlist instead. The export logs a warning
 if any file crosses that line.
 
 ### Current sizes
-- `csv/malicious_all.csv` — ~42 MB (235,286 rows)
-- `csv/malicious_high_signal.csv` — ~16 MB (91,208 rows)
-- `csv/vulnerable_all.csv` — ~48k rows
-- `csv/vulnerable_exploited.csv` — small
+- `csv/malicious_all.csv` — ~42 MB (235,287 rows)
+- `csv/malicious_high_signal.csv` — ~16 MB (91,209 rows)
+- `csv/vulnerable_all.csv` — ~19 MB (57,740 rows)
+- `csv/vulnerable_exploited.csv` — ~0.7 MB (2,251 rows: 296 in KEV, 71 of those
+  linked to ransomware campaigns; the rest EPSS ≥ 0.1)
 
 ### Why this repo doesn't use GitHub Releases
 Files are served via **`raw.githubusercontent.com`** as regular repository
