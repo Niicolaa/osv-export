@@ -80,7 +80,8 @@ REPO_HINTS = {
 
 MALICIOUS_COLS = [
     "ecosystem", "package", "package_lc", "repo_hint",
-    "mal_id", "source", "published", "modified", "summary",
+    "mal_id", "source", "all_versions", "versions",
+    "published", "modified", "summary",
 ]
 
 VULNERABLE_COLS = [
@@ -88,9 +89,15 @@ VULNERABLE_COLS = [
     "osv_id", "cve", "aliases",
     "kev", "kev_ransomware", "epss", "epss_percentile",
     "cvss_v3", "cvss_v4",
-    "introduced", "fixed",
+    "all_versions", "introduced", "fixed", "versions",
     "published", "modified", "summary",
 ]
+
+# One row per affected version, for exact (package, version) joins. Split per
+# ecosystem because the exploded form is ~1.9M rows overall - well past what
+# externaldata() will read from a single file. Join back to vulnerable_all.csv
+# on osv_id for CVE / KEV / EPSS.
+VERSION_COLS = ["package_lc", "version", "osv_id"]
 
 # externaldata() reads external artifacts up to 100 MB. Anything larger has to
 # be ingested as a table or watchlist instead, so the build says so loudly.
@@ -117,8 +124,47 @@ def clean(value: str | None) -> str:
     return " ".join((value or "").split())
 
 
+def slug(value: str) -> str:
+    """Filename-safe ecosystem name: 'crates.io' -> 'crates_io'."""
+    return "".join(c if c.isalnum() else "_" for c in value.lower()).strip("_")
+
+
 def repo_hint(ecosystem: str) -> str:
     return REPO_HINTS.get(ecosystem.lower(), "")
+
+
+def affected_versions(affected: dict) -> tuple[list[str], bool]:
+    """Explicit affected versions, and whether every version is affected.
+
+    `all_versions` is true when a range starts at version 0 and never gets
+    fixed, which is how OSV expresses "the whole package is bad" - the normal
+    case for malicious packages. Consumers should treat any version as a match
+    when it is set, and fall back to `versions` otherwise.
+    """
+    versions = [str(v) for v in (affected.get("versions") or []) if v]
+    everything = False
+    for rng in affected.get("ranges") or []:
+        events = (rng or {}).get("events") or []
+        starts_at_zero = any(
+            isinstance(e, dict) and str(e.get("introduced", "")) == "0" for e in events
+        )
+        ever_fixed = any(
+            isinstance(e, dict) and ("fixed" in e or "last_affected" in e) for e in events
+        )
+        if starts_at_zero and not ever_fixed:
+            everything = True
+            break
+    return list(dict.fromkeys(versions)), everything
+
+
+def pad(versions: list[str]) -> str:
+    """Pipe-delimited with leading and trailing delimiters.
+
+    The padding matters: it lets a consumer test membership with a plain
+    substring match - `versions has "|1.0.1|"` - without `1.0.1` also matching
+    `1.0.10`.
+    """
+    return "|" + "|".join(versions) + "|" if versions else ""
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict]) -> None:
@@ -189,6 +235,7 @@ def build_malicious(tarball: Path | None) -> list[dict]:
                 if key in seen:
                     continue
                 seen.add(key)
+                versions, everything = affected_versions(affected)
                 rows.append({
                     "ecosystem": ecosystem,
                     "package": name,
@@ -196,6 +243,8 @@ def build_malicious(tarball: Path | None) -> list[dict]:
                     "repo_hint": repo_hint(ecosystem),
                     "mal_id": mal_id,
                     "source": source,
+                    "all_versions": "true" if everything else "false",
+                    "versions": pad(versions),
                     "published": record.get("published", ""),
                     "modified": record.get("modified", ""),
                     "summary": clean(record.get("summary")),
@@ -326,6 +375,7 @@ def build_vulnerable(kev: dict[str, bool],
 
                     v3, v4 = severity_vectors(record, affected)
                     introduced, fixed = version_bounds(affected)
+                    versions, everything = affected_versions(affected)
                     rows.append({
                         "ecosystem": eco,
                         "package": pkg_name,
@@ -340,8 +390,10 @@ def build_vulnerable(kev: dict[str, bool],
                         "epss_percentile": percentile,
                         "cvss_v3": v3,
                         "cvss_v4": v4,
+                        "all_versions": "true" if everything else "false",
                         "introduced": introduced,
                         "fixed": fixed,
+                        "versions": pad(versions),
                         "published": record.get("published", ""),
                         "modified": record.get("modified", ""),
                         "summary": clean(record.get("summary")),
@@ -394,6 +446,23 @@ def main() -> int:
             log.error("no vulnerability rows produced, refusing to publish")
             return 1
         write_csv(csv_dir / "vulnerable_all.csv", VULNERABLE_COLS, rows)
+
+        # One file per ecosystem, one row per affected version, so a consumer
+        # can join on (package_lc, version) instead of flagging every version
+        # of a package that was only ever vulnerable in a few of them.
+        by_ecosystem: dict[str, list[dict]] = {}
+        for row in rows:
+            for version in row["versions"].strip("|").split("|"):
+                if not version:
+                    continue
+                by_ecosystem.setdefault(row["ecosystem"], []).append({
+                    "package_lc": row["package_lc"],
+                    "version": version,
+                    "osv_id": row["osv_id"],
+                })
+        for ecosystem, exploded in sorted(by_ecosystem.items()):
+            write_csv(csv_dir / "versions" / f"{slug(ecosystem)}.csv",
+                      VERSION_COLS, exploded)
 
         def exploited(row: dict) -> bool:
             if row["kev"] == "true":
