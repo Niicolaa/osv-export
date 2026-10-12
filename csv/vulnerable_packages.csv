@@ -53423,6 +53423,8 @@
 "crates.io","wasapi","wasapi","cargo","RUSTSEC-2026-0332","false","0.20.0","0.25.0",""
 "crates.io","noyalib","noyalib","cargo","RUSTSEC-2026-0333","false","0.0.0-0","0.0.53",""
 "crates.io","bip322","bip322","cargo","RUSTSEC-2026-0334","false","0.0.6","0.0.11",""
+"crates.io","mykey","mykey","cargo","RUSTSEC-2026-0335","false","0.0.0-0","2.0.0",""
+"crates.io","mykey","mykey","cargo","RUSTSEC-2026-0336","false","0.0.0-0","2.0.0",""
 "Packagist:https://packages.drupal.org/8","drupal/permissions_by_term","drupal/permissions_by_term","","DRUPAL-CONTRIB-2017-082","false","0","1.35.0",""
 "Packagist:https://packages.drupal.org/8","drupal/config_perms","drupal/config_perms","","DRUPAL-CONTRIB-2017-083","false","0","1.1.0",""
 "Packagist:https://packages.drupal.org/8","drupal/config_update","drupal/config_update","","DRUPAL-CONTRIB-2017-091","false","0","1.5.0",""
