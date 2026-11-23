@@ -55849,6 +55849,8 @@
 "crates.io","secure-gate","secure-gate","cargo","RUSTSEC-2026-0590","false","0.5.0","0.8.0-rc.1",""
 "crates.io","secmem-proc","secmem-proc","cargo","RUSTSEC-2026-0591","false","0.0.0-0","0.3.9",""
 "crates.io","url","url","cargo","RUSTSEC-2026-0592","false","0.0.0-0","2.5.9",""
+"crates.io","pqcrypto-dilithium","pqcrypto-dilithium","cargo","RUSTSEC-2026-0593","false","0.0.0-0","",""
+"crates.io","cookie","cookie","cargo","RUSTSEC-2026-0594","false","0.11.3|0.14.0","0.12.0|0.18.3",""
 "Packagist:https://packages.drupal.org/8","drupal/permissions_by_term","drupal/permissions_by_term","","DRUPAL-CONTRIB-2017-082","false","0","1.35.0",""
 "Packagist:https://packages.drupal.org/8","drupal/config_perms","drupal/config_perms","","DRUPAL-CONTRIB-2017-083","false","0","1.1.0",""
 "Packagist:https://packages.drupal.org/8","drupal/config_update","drupal/config_update","","DRUPAL-CONTRIB-2017-091","false","0","1.5.0",""
